@@ -1,0 +1,24 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, build artifacts
+*.test
+*.out
+*.[oa]
+_test/
+_obj/
+`basename $(pwd)`.exe # Ignore project-name executables
+
+# Environment variables file
+.env
+
+# Dependency directories (should be handled by go mod)
+vendor/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
