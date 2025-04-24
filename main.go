@@ -9,9 +9,15 @@ import (
 	"github.com/inirafli/go-url-shortener/internal/storage"
 )
 
+const urlStoragePath = "urls.tsv"
+
 func main() {
 	// Initialize depedencies
-	urlStorage := storage.NewStorage()
+	urlStorage, err := storage.NewStorage(urlStoragePath)
+	if err != nil {
+		log.Fatalf("Failed to initialize storage: %v", err)
+	}
+
 	urlHandler := handler.NewHandler(urlStorage)
 
 	// Handler for the /shorten endpoint.
@@ -35,9 +41,10 @@ func main() {
 
 	port := ":8080"
 	fmt.Printf("Starting URL Shortener server on port %s\n", port)
+	fmt.Printf("Using storage file: %s\n", urlStoragePath)
 
 	// Start the HTTP server using the DefaultServeMux
-	err := http.ListenAndServe(port, nil)
+	err = http.ListenAndServe(port, nil)
 	if err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}

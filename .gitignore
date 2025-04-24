@@ -22,3 +22,6 @@ vendor/
 # OS-specific files
 .DS_Store
 Thumbs.db
+
+# Storage file for URL data
+urls.tsv
