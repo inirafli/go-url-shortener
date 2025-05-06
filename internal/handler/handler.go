@@ -48,6 +48,8 @@ func isValidURL(urlStr string) bool {
 
 // Handler for URL shortening requests
 func (h *Handler) ShortenURL(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "Invalid request method")
 		return
@@ -106,7 +108,7 @@ func (h *Handler) ShortenURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	shortID, err := h.storage.Save(req.LongURL)
+	shortID, err := h.storage.Save(ctx, req.LongURL)
 	if err != nil {
 		log.Printf("Error saving URL to storage: %v", err)
 		writeError(w, http.StatusInternalServerError, "Failed to shorten URL")
@@ -128,6 +130,8 @@ func (h *Handler) ShortenURL(w http.ResponseWriter, r *http.Request) {
 
 // RedirectURL handles requests to redirect a short URL to its original long URL
 func (h *Handler) RedirectURL(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "Invalid request method")
 		return
@@ -140,7 +144,7 @@ func (h *Handler) RedirectURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	//  Use Storage to Load Long URL
-	longURL, err := h.storage.Load(shortID)
+	longURL, err := h.storage.Load(ctx, shortID)
 	if err != nil {
 		log.Printf("Error loading URL for shortID '%s': %v", shortID, err)
 

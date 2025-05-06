@@ -1,89 +1,106 @@
 package storage
 
 import (
-	"bufio"
+	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
-	"os"
-	"strings"
-	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 const shortIDLength = 6
+const uniqueViolationCode = "23505"
 
 type Storage struct {
-	mu       sync.RWMutex
-	urls     map[string]string
-	r        *rand.Rand
-	filePath string
+	db *sql.DB
+	r  *rand.Rand
 }
 
-func NewStorage(filePath string) (*Storage, error) {
+func NewStorage(dsn string) (*Storage, error) {
+	// Open database connection
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database connection: %w", err)
+	}
+
+	// Verify the connection
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err = db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	log.Println("Database connection established successfully.")
+
 	source := rand.NewSource(time.Now().UnixNano())
 	randomGenerator := rand.New(source)
 
-	s := &Storage{
-		urls:     make(map[string]string),
-		r:        randomGenerator,
-		filePath: filePath,
-	}
-
-	err := s.loadFromFile()
-	if err != nil {
-		log.Printf("Warning: Could not load data from file '%s': %v. Starting with empty storage.", filePath, err)
-		s.urls = make(map[string]string)
-		return s, nil
-	}
-
-	log.Printf("Loaded %d URLs from %s", len(s.urls), filePath)
-	return s, nil
+	return &Storage{
+		db: db,
+		r:  randomGenerator,
+	}, nil
 }
 
-func (s *Storage) Save(longURL string) (string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+// Close releases the database connection pool.
+func (s *Storage) Close() error {
+	if s.db != nil {
+		log.Println("Closing database connection pool.")
+		return s.db.Close()
+	}
+	return nil
+}
 
-	var shortID string
-	var saveErr error
+func (s *Storage) Save(ctx context.Context, longURL string) (string, error) {
+	for i := 0; i < 5; i++ {
+		shortID := s.generateShortID()
 
-	foundUniqueID := false
-	for range 5 {
-		genID := s.generateShortID()
-		if _, exists := s.urls[genID]; !exists {
-			shortID = genID
-			foundUniqueID = true
-			break
+		stmt := `INSERT INTO urls (short_id, long_url) VALUES ($1, $2)`
+		// Execute the INSERT statement
+		_, err := s.db.ExecContext(ctx, stmt, shortID, longURL)
+		if err == nil {
+			return shortID, nil
 		}
+
+		// Check if the error is a unique key violation (collision)
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode {
+			log.Printf("Collision detected for short ID '%s', retrying...", shortID)
+			continue
+		}
+
+		// Other database error occurred
+		log.Printf("Error saving URL to database: %v", err)
+		return "", fmt.Errorf("failed to save URL to database: %w", err)
 	}
 
-	if !foundUniqueID {
-		return "", fmt.Errorf("failed to generate a unique short ID after multiple attempts")
-	}
-
-	s.urls[shortID] = longURL
-
-	saveErr = s.appendToFile(shortID, longURL)
-	if saveErr != nil {
-		log.Printf("Error: Failed to persist shortID '%s' to file '%s': %v", shortID, s.filePath, saveErr)
-		delete(s.urls, shortID)
-		return "", fmt.Errorf("failed to save URL persistently: %w", saveErr)
-	}
-
-	return shortID, nil
+	return "", errors.New("failed to generate a unique short ID after multiple attempts")
 }
 
-func (s *Storage) Load(shortID string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Storage) Load(ctx context.Context, shortID string) (string, error) {
+	var longURL string
 
-	longUrl, exists := s.urls[shortID]
-	if !exists {
-		return "", fmt.Errorf("short ID not found: %s", shortID)
+	stmt := `SELECT long_url FROM urls WHERE short_id = $1`
+	row := s.db.QueryRowContext(ctx, stmt, shortID)
+
+	err := row.Scan(&longURL)
+	if err != nil {
+		// shortID is not found
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("short ID not found: %s", shortID)
+		}
+		// Other database error occurred
+		log.Printf("Error loading URL from database: %v", err)
+		return "", fmt.Errorf("failed to load URL from database: %w", err)
 	}
 
-	return longUrl, nil
+	return longURL, nil
 }
 
 func (s *Storage) generateShortID() string {
@@ -93,60 +110,4 @@ func (s *Storage) generateShortID() string {
 		b[i] = charset[s.r.Intn(len(charset))]
 	}
 	return string(b)
-}
-
-func (s *Storage) loadFromFile() error {
-	file, err := os.OpenFile(s.filePath, os.O_RDWR|os.O_CREATE, 0666)
-	if err != nil {
-		return fmt.Errorf("failed to open storage file: %w", err)
-	}
-
-	defer file.Close()
-
-	// Scanner to read the file line by line
-	scanner := bufio.NewScanner(file)
-	loadedCount := 0
-	tempUrls := make(map[string]string)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) != 2 {
-			log.Printf("Warning: Skipping malformed line in %s: %s", s.filePath, line)
-			continue
-		}
-
-		shortID := parts[0]
-		longURL := parts[1]
-		tempUrls[shortID] = longURL
-		loadedCount++
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("error reading storage file: %w", err)
-	}
-
-	s.urls = tempUrls
-	return nil
-}
-
-func (s *Storage) appendToFile(shortID, longURL string) error {
-	file, err := os.OpenFile(s.filePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
-	if err != nil {
-		return fmt.Errorf("failed to open storage file for appending: %w", err)
-	}
-	defer file.Close()
-
-	record := fmt.Sprintf("%s\t%s\n", shortID, longURL) // TSV format
-
-	_, err = file.WriteString(record)
-	if err != nil {
-		return fmt.Errorf("Failed to write record to storage file: %w", err)
-	}
-
-	return nil
 }
